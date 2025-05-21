@@ -1,25 +1,24 @@
 import pandas as pd
 import nltk
 from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
+from nltk.tokenize import TreebankWordTokenizer
 from nltk.stem import WordNetLemmatizer
 import string
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score
-
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import hstack
+import numpy as np
 
 # Download NLTK resources (run only once)
 nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('wordnet')
 
-# Load the dataset
-#dataset_path = ('comment out my path and add your hown to the training data')
-dataset_path = "/home/elleixir/HLT/ling-539-sp-2024-class-competition/train.csv" 
+# Load the training dataset
+dataset_path = "/home/elleixir/Downloads/ling-582-fall-2024-class-competition-code-leliarhodes72/competition-data/train.csv"
 dataset = pd.read_csv(dataset_path)
-
-dataset.fillna({'TEXT' : ''}, inplace=True)
+dataset.fillna({'TEXT': ''}, inplace=True)
 
 # Initialize WordNet lemmatizer
 lemmatizer = WordNetLemmatizer()
@@ -32,7 +31,8 @@ def preprocess_text(text):
         # Remove punctuation
         text = text.translate(str.maketrans('', '', string.punctuation))
         # Tokenization
-        tokens = word_tokenize(text)
+        tokenizer = TreebankWordTokenizer()
+        tokens = tokenizer.tokenize(text)
         # Remove stopwords
         stop_words = set(stopwords.words('english'))
         filtered_tokens = [word for word in tokens if word not in stop_words]
@@ -42,52 +42,70 @@ def preprocess_text(text):
         preprocessed_text = ' '.join(lemmatized_tokens)
         return preprocessed_text
     else:
-        # Return empty string if input is not a string
-        return ''
+        return ''  # Return empty string if input is not a string
 
+# Split the text into two spans and preprocess each
+def preprocess_spans(text):
+    spans = text.split("[SNIPPET]")
+    if len(spans) == 2:
+        span1, span2 = preprocess_text(spans[0]), preprocess_text(spans[1])
+    else:
+        span1, span2 = preprocess_text(spans[0]), ''  # Handle missing span
+    return span1, span2
 
 # Apply text preprocessing to the 'TEXT' column
-dataset['TEXT'] = dataset['TEXT'].apply(preprocess_text)
+dataset[['SPAN1', 'SPAN2']] = dataset['TEXT'].apply(preprocess_spans).apply(pd.Series)
 
+# Concatenate spans to get a single representation for each entry
+combined_text = dataset['SPAN1'] + ' ' + dataset['SPAN2']
 
-
-
-tfidf_vectorizer = TfidfVectorizer()
-
-# Fit and transform the 'TEXT' column of the dataset to obtain TF-IDF features
-train_tfidf = tfidf_vectorizer.fit_transform(dataset['TEXT'])
-
-
-
+# Improved TF-IDF vectorizer with adjusted parameters
+tfidf_vectorizer = TfidfVectorizer(
+    max_features=5000,        # Limits the number of features
+    ngram_range=(1, 2),       # Includes unigrams and bigrams
+    min_df=2,                 # Ignores terms with frequency < 2
+    max_df=0.8                # Ignores terms in more than 80% of documents
+)
+train_tfidf = tfidf_vectorizer.fit_transform(combined_text)
 
 # Define target variable
-y_train = dataset['LABEL'] 
+y_train = dataset['LABEL']
 
-# Instantiate the logistic regression model
-logistic_regression_model = LogisticRegression()
+# Compute cosine similarity as an additional feature
+span1_tfidf = tfidf_vectorizer.transform(dataset['SPAN1'])
+span2_tfidf = tfidf_vectorizer.transform(dataset['SPAN2'])
+cos_sim = np.array([cosine_similarity(span1, span2)[0, 0] for span1, span2 in zip(span1_tfidf, span2_tfidf)])
 
-# Train the model on the training data
-logistic_regression_model.fit(train_tfidf, y_train)
+# Combine TF-IDF features with cosine similarity
+train_features = hstack([train_tfidf, cos_sim.reshape(-1, 1)])
 
+# Train gradient boosting classifier
+gbc = GradientBoostingClassifier()
+gbc.fit(train_features, y_train)
 
-
-
-# Load the test set
-#dataset_path = ('comment out my path and add your hown to the training data')
-test_dataset_path = "/home/elleixir/HLT/ling-539-sp-2024-class-competition/test.csv" 
+# Load and preprocess the test set
+test_dataset_path = "/home/elleixir/Downloads/ling-582-fall-2024-class-competition-code-leliarhodes72/competition-data/test.csv"
 test_dataset = pd.read_csv(test_dataset_path)
+test_dataset.fillna({'TEXT': ''}, inplace=True)
+test_dataset[['SPAN1', 'SPAN2']] = test_dataset['TEXT'].apply(preprocess_spans).apply(pd.Series)
+test_combined_text = test_dataset['SPAN1'] + ' ' + test_dataset['SPAN2']
+test_tfidf = tfidf_vectorizer.transform(test_combined_text)
 
-# Preprocess test data
-test_dataset['TEXT'] = test_dataset['TEXT'].apply(preprocess_text)
+# Compute cosine similarity for test set
+test_span1_tfidf = tfidf_vectorizer.transform(test_dataset['SPAN1'])
+test_span2_tfidf = tfidf_vectorizer.transform(test_dataset['SPAN2'])
+test_cos_sim = np.array([cosine_similarity(span1, span2)[0, 0] for span1, span2 in zip(test_span1_tfidf, test_span2_tfidf)])
 
-# Transform test data into TF-IDF features
-test_tfidf = tfidf_vectorizer.transform(test_dataset['TEXT'])
+# Combine test TF-IDF features with cosine similarity
+test_features = hstack([test_tfidf, test_cos_sim.reshape(-1, 1)])
 
 # Make predictions on the test set
-predictions = logistic_regression_model.predict(test_tfidf)
+test_predictions = gbc.predict(test_features)
 
-# Add predicted labels to the test dataset
-test_dataset['LABEL'] = predictions
+# Save predictions to submission file
+test_dataset['LABEL'] = test_predictions
+test_dataset[['ID', 'LABEL']].to_csv('submission.csv', index=False)
 
-# Save the DataFrame to a CSV file
+# Save predictions to submission file
+test_dataset['LABEL'] = test_predictions
 test_dataset[['ID', 'LABEL']].to_csv('submission.csv', index=False)
